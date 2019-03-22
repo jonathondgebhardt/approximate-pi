@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <mpi.h>
 
 /*
 * Approximates the value of pi. 
@@ -32,7 +33,15 @@ int getInsidePoints(int);
 
 int main(int argc, char *argv[])
 {
-    int opt, numPoints, epsilon;
+    
+    int rank, ncpu;
+
+    MPI_Init(&argc,&argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &ncpu);
+
+    int opt, numPoints;
+    double epsilon;
     numPoints = -1, epsilon = -1;
 
     // TODO: Should also check that numPoints and epsilon don't equal -1 
@@ -45,7 +54,7 @@ int main(int argc, char *argv[])
                 numPoints = atoi(optarg);
                 break;
             case 'e':
-                epsilon = atoi(optarg);
+                epsilon = atof(optarg);
                 break;
             case '?':
                 showUsage();
@@ -67,16 +76,87 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // If rank is zero, dispatch tasks while delta is greater than 
-    // epsilon.
+    int startTask = 1, stopTask = 0;
+    if(rank == 0)
+    {
+        int i, totalInsidePoints = 0, totalPoints = 0, iterations = 0;
+        double delta = 999, newApproximation, approximation = 0;
+        
+        // Dispatch tasks while delta is greater than epsilon.        
+        printf("[%d] Starting work with %d nodes\n", rank, ncpu);
+        while(delta > epsilon)
+        {
+            int msg;
 
-    // Otherwise, generate points.
-    initializeRNG();
-    int P = getInsidePoints(numPoints);
+            approximation = newApproximation;
+            
+            // Signal to workers to start task.
+            for(i = 1; i < ncpu; ++i)
+            {
+                MPI_Send(&startTask, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+            }
+           
+            // Get response from workers.
+            for(i = 1; i < ncpu; ++i)
+            {
+                MPI_Recv(&msg, 1, MPI_INT, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                totalInsidePoints += msg;
+            }
+            
+            totalPoints += numPoints * (ncpu-1);
 
-    double approximation; 
-    approximation = 4 * (P / (double)numPoints);
-    printf("approximation of pi is %f\n", approximation);
+            newApproximation = 4 * (totalInsidePoints / (double)totalPoints);
+//            if(approximation == 0)
+//            {
+//                printf("[%d] Starting with %f\n", rank, newApproximation);
+//            }
+//            else
+//            {
+//                approximation = newApproximation;
+//            }
+            
+            printf("[%d] Comparing new %f with previous %f using epsilon %f\n", rank, newApproximation, approximation, epsilon);
+            delta = abs(newApproximation - approximation);
+            iterations++;
+        }
+
+        // Signal to workers that task is finished.
+        printf("[%d] Stopping work\n", rank);
+        for(i = 1; i < ncpu; ++i)
+        {
+            MPI_Send(&stopTask, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+        }
+    
+        printf("[%d] Approximation is %f after %d tries using %d workers\n", rank, approximation, iterations, (ncpu-1));
+        printf("[%d] %d total inside points out of %d total points generated\n", rank, totalInsidePoints, totalPoints);
+    }
+    else
+    {
+        printf("[%d] Beginning task\n", rank);
+
+        // Otherwise, generate points.
+        initializeRNG();
+
+        int i;
+        while(1) 
+        {
+            int msg;
+            // Wait for signal from taskmaster.
+            MPI_Recv(&msg, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if(msg == stopTask)
+            {
+                printf("[%d] Finished\n", rank);
+                break;
+            }
+
+            int insidePoints;
+            insidePoints = getInsidePoints(numPoints);
+
+            MPI_Send(&insidePoints, 1, MPI_INT, 0, 1, MPI_COMM_WORLD);
+        }
+    } 
+    
+    MPI_Finalize();
 
     return 0;
 }

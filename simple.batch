@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+#SBATCH -N 4 
+#SBATCH --tasks-per-node=1
+#SBATCH --job-name=approximate
+#SBATCH --output=approximate.txt
+
+## First make sure all other modules are not loaded
+module purge
+
+## Load the appropriate module
+## To see a list of available modules run:
+## module avail
+module load openmpi-2.0/gcc
+
+# Run on a single Node 
+mpirun --mca btl_tcp_if_include en0 --mca btl tcp,self -np 4 ./approximate.mpi -n 100 -e 0.0001 
+
