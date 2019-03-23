@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <time.h>
 #include <mpi.h>
 
 /*
@@ -26,6 +25,13 @@
 *   - The optimal value for P, where P is the number of points generated 
 *     by each node
 */
+
+/*
+ * After researching a compiler warning thrown by using fabs, I saw
+ * several solutions online for generating pi that used MPI_Reduce
+ * instead of relaying messages between a taskmaster and workers. This
+ * would greatly simplify the logic I've implemented.
+ */
 
 void showUsage();
 void initializeRNG();
@@ -79,17 +85,15 @@ int main(int argc, char *argv[])
     int startTask = 1, stopTask = 0;
     if(rank == 0)
     {
+        double startTime = MPI_Wtime();
+       
         int i, totalInsidePoints = 0, totalPoints = 0, iterations = 0;
-        double delta = 999, newApproximation, approximation = 0;
+        double newApproximation, approximation = 0, delta = 999;
         
         // Dispatch tasks while delta is greater than epsilon.        
-        printf("[%d] Starting work with %d nodes\n", rank, ncpu);
+        printf("[%d] Starting work\n", rank);
         while(delta > epsilon)
         {
-            int msg;
-
-            approximation = newApproximation;
-            
             // Signal to workers to start task.
             for(i = 1; i < ncpu; ++i)
             {
@@ -97,6 +101,7 @@ int main(int argc, char *argv[])
             }
            
             // Get response from workers.
+            int msg;
             for(i = 1; i < ncpu; ++i)
             {
                 MPI_Recv(&msg, 1, MPI_INT, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -106,17 +111,9 @@ int main(int argc, char *argv[])
             totalPoints += numPoints * (ncpu-1);
 
             newApproximation = 4 * (totalInsidePoints / (double)totalPoints);
-//            if(approximation == 0)
-//            {
-//                printf("[%d] Starting with %f\n", rank, newApproximation);
-//            }
-//            else
-//            {
-//                approximation = newApproximation;
-//            }
+            delta = fabs(newApproximation - approximation);
+            approximation = newApproximation;
             
-            printf("[%d] Comparing new %f with previous %f using epsilon %f\n", rank, newApproximation, approximation, epsilon);
-            delta = abs(newApproximation - approximation);
             iterations++;
         }
 
@@ -127,21 +124,22 @@ int main(int argc, char *argv[])
             MPI_Send(&stopTask, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
         }
     
+        double endTime = MPI_Wtime();
+        
         printf("[%d] Approximation is %f after %d tries using %d workers\n", rank, approximation, iterations, (ncpu-1));
         printf("[%d] %d total inside points out of %d total points generated\n", rank, totalInsidePoints, totalPoints);
+        printf("[%d] Task took %f seconds\n", rank, (endTime - startTime));
     }
     else
     {
         printf("[%d] Beginning task\n", rank);
 
-        // Otherwise, generate points.
         initializeRNG();
 
-        int i;
         while(1) 
         {
-            int msg;
             // Wait for signal from taskmaster.
+            int msg;
             MPI_Recv(&msg, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             if(msg == stopTask)
             {
@@ -149,9 +147,7 @@ int main(int argc, char *argv[])
                 break;
             }
 
-            int insidePoints;
-            insidePoints = getInsidePoints(numPoints);
-
+            int insidePoints = getInsidePoints(numPoints);
             MPI_Send(&insidePoints, 1, MPI_INT, 0, 1, MPI_COMM_WORLD);
         }
     } 
@@ -168,7 +164,7 @@ void showUsage()
 
 /*
  * Using a constant as a seed, or even system time, can generate an 
- * identical series of numbers. Use /dev/random instead to seed to
+ * identical series of numbers. Use /dev/random instead to provide 
  * more diversity in the seed.
  *
  * forums.justlinux.com/showthread.php?48570-srand-and-dev-urandom
