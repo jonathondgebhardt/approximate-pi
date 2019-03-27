@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <time.h>
+#include <mpi.h>
 
 /*
-* Approximates the value of pi. 
+* Leverage Slurm and MPI to approximate pi.
 *
 * Author: Jonathon Gebhardt
 * Class: CS4900-B90
@@ -26,17 +26,23 @@
 *     by each node
 */
 
-void showUsage();
+void showUsage(char*);
 void initializeRNG();
 int getInsidePoints(int);
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
-    int opt, numPoints, epsilon;
+    
+    int rank, ncpu;
+
+    MPI_Init(&argc,&argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &ncpu);
+
+    int opt, numPoints;
+    double epsilon;
     numPoints = -1, epsilon = -1;
 
-    // TODO: Should also check that numPoints and epsilon don't equal -1 
-    // after this loop.
     while((opt = getopt(argc, argv, "n:e:")) != -1)
     {
         switch(opt)
@@ -45,50 +51,144 @@ int main(int argc, char *argv[])
                 numPoints = atoi(optarg);
                 break;
             case 'e':
-                epsilon = atoi(optarg);
+                epsilon = atof(optarg);
                 break;
             case '?':
-                showUsage();
+                if(rank == 0)
+                {
+                    showUsage(argv[0]);
+                }
                 break;
         }
     }
 
-    if(numPoints == 0)
+    if(numPoints == 0 || numPoints == -1)
     {
-        fprintf(stderr, "Error: invalid parameter '-n'\n");
-        showUsage();
+        if(rank == 0)
+        {
+            fprintf(stderr, "Error: invalid parameter '-n'\n");
+            showUsage(argv[0]);
+        }
+        
         return 1;
     }
 
-    if(epsilon == 0)
+    if(epsilon == 0 || epsilon == -1)
     {
-        fprintf(stderr, "Error: invalid parameter '-e'\n");
-        showUsage();
+        if(rank == 0)
+        {
+            fprintf(stderr, "Error: invalid parameter '-e'\n");
+            showUsage(argv[0]);
+        }
+        
         return 1;
     }
 
-    // If rank is zero, dispatch tasks while delta is greater than 
-    // epsilon.
+    int startTask = 1, stopTask = 0;
+    if(rank == 0)
+    {
+        double startTime = MPI_Wtime();
+       
+        int i, totalInsidePoints = 0, totalPoints = 0, iterations = 0, 
+            converge = 0;
+        double newApproximation, approximation = 0, delta = 999;
+        
+        // Dispatch tasks while delta is greater than epsilon.        
+        printf("[%d] Starting work. n=%d, e=%f.\n", rank, numPoints, 
+               epsilon);
+        while(converge < 4)
+        {
+            // Signal to workers to start task.
+            for(i = 1; i < ncpu; ++i)
+            {
+                MPI_Send(&startTask, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+            }
+           
+            // Get response from workers.
+            int msg;
+            for(i = 1; i < ncpu; ++i)
+            {
+                MPI_Recv(&msg, 1, MPI_INT, i, 1, MPI_COMM_WORLD, 
+                         MPI_STATUS_IGNORE);
+                totalInsidePoints += msg;
+            }
+            
+            totalPoints += numPoints * (ncpu-1);
 
-    // Otherwise, generate points.
-    initializeRNG();
-    int P = getInsidePoints(numPoints);
+            newApproximation = 4 * 
+                               (totalInsidePoints / (double)totalPoints);
+            delta = fabs(newApproximation - approximation);
+            approximation = newApproximation;
+            
+            iterations++;
 
-    double approximation; 
-    approximation = 4 * (P / (double)numPoints);
-    printf("approximation of pi is %f\n", approximation);
+            if(delta <= epsilon)
+            {
+                converge++;
+            }
+            else 
+            {
+                converge = 0;
+            }
+        }
+
+        // Signal to workers that task is finished.
+        printf("[%d] Stopping work\n", rank);
+        for(i = 1; i < ncpu; ++i)
+        {
+            MPI_Send(&stopTask, 1, MPI_INT, i, 1, MPI_COMM_WORLD);
+        }
+    
+        double endTime = MPI_Wtime();
+
+        // Show results.
+        printf("[%d] Approximation is %f after %d tries using %d workers\n", 
+               rank, approximation, iterations, (ncpu-1));
+        printf("[%d] %d total inside points out of %d total points generated\n", 
+               rank, totalInsidePoints, totalPoints);
+        printf("[%d] Task took %f seconds\n", rank, 
+               (endTime - startTime));
+    }
+    else
+    {
+        printf("[%d] Beginning task\n", rank);
+
+        // Seed the worker nodes before generating random numbers.
+        srand(rank);
+
+        while(1) 
+        {
+            // Wait for signal from task master.
+            int msg;
+            MPI_Recv(&msg, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, 
+                     MPI_STATUS_IGNORE);
+            if(msg == stopTask)
+            {
+                printf("[%d] Finished\n", rank);
+                break;
+            }
+
+            // Report amount of inside points generated to task master.
+            int insidePoints = getInsidePoints(numPoints);
+            MPI_Send(&insidePoints, 1, MPI_INT, 0, 1, MPI_COMM_WORLD);
+        }
+    } 
+    
+    MPI_Finalize();
 
     return 0;
 }
 
-void showUsage()
+void showUsage(char* applicationName)
 {
-    printf("showing usage...\n");
+    printf("Usage: %s [-n ] [-e]\n", applicationName);
+    printf("\t-n: Number of points for each node to generate\n");
+    printf("\t-e: Value of epsilon\n");
 }
 
 /*
  * Using a constant as a seed, or even system time, can generate an 
- * identical series of numbers. Use /dev/random instead to seed to
+ * identical series of numbers. Use /dev/random instead to provide 
  * more diversity in the seed.
  *
  * forums.justlinux.com/showthread.php?48570-srand-and-dev-urandom
